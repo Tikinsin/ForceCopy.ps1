@@ -67,7 +67,7 @@ function Main {
         Write-Host $destinationFile
 
         $fileHandle = $null
-        $process = $null
+        $processId = $null
 
         # Test if file in destination exists
         if (Test-Path -Path $destinationFile -PathType Leaf) {
@@ -88,12 +88,12 @@ function Main {
                     $fileHandleStop = New-Object IO.FileStream ($destinationFile, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
                 }
                 catch {
-                    $process = Get-FileLockProcess -FilePath $destinationFile
+                    $processId = Get-ProcessID -Process $(Get-FileLockProcess -FilePath $destinationFile)
 
-                    if($process){
-                        Write-Host "Process Info Found: $($process)"
-                        Write-Host "Found locked file $($destinationFile). Killing process $($process.COMMAND) (ID: $($process.PID))"
-                        Stop-Process -Id $process.PID
+                    if($processId){
+                        Write-Host "Found locked file $($destinationFile). Killing process ID: $($processId)"
+                        # Stop-Process -Id $process.PID
+                        Stop-Process -Id $processId
 
                         if ($StopToKillWaitTime -gt 0) {
                             Write-Host "Waiting $($StopToKillWaitTime) seconds before checking force kill is necessary."
@@ -106,11 +106,11 @@ function Main {
                             $fileHandleForce = New-Object IO.FileStream ($destinationFile, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
                         }
                         catch {
-                            $process = Get-FileLockProcess -FilePath $destinationFile
+                            $processId = Get-ProcessID -Process $(Get-FileLockProcess -FilePath $destinationFile)
                 
-                            if($process){
-                                Write-Host "Still found locked file $($destinationFile) after waiting 10 seconds. Killing process $($process.COMMAND) (ID: $($process.PID))"
-                                Stop-Process -Id $process.PID -Force
+                            if($processId){
+                                Write-Host "Still found locked file $($destinationFile) after waiting 10 seconds. Killing process ID: $($processId)"
+                                Stop-Process -Id $processId -Force
                             }
                         }
                         finally {
@@ -146,6 +146,35 @@ function Main {
             Write-Host "Copy Failed || Source: $($sourceFile)  ||  Destination: $($destinationFile)"
         }
     }
+}
+
+function Get-ProcessID {
+    [CmdletBinding()]
+    Param(
+        [Parameter(
+            Mandatory = $true,
+            HelpMessage = "Source Path of files to copy from"
+        )]
+        [ValidateNotNull()]
+        [System.Object] $Process
+    )
+    # $Process = $args[0]
+
+    if ($Process -eq $null) {
+        return $null
+    }
+
+    Write-Host "Process Info Found: $($Process)"
+
+    if ($Process.PID -ne $null) {
+        return $Process.PID
+    }
+    
+    if ($Process.Id -ne $null) {
+        return $Process.Id
+    }
+
+    return $null
 }
 
 function Copy-Item-Recurse {
