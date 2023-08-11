@@ -18,13 +18,7 @@ Param(
         Mandatory = $false,
         HelpMessage = "Amount of time to wait between Stop and Kill (in seconds)"
     )]
-    [int32] $StopToKillWaitTime = 10,
-
-    [Parameter(
-        Mandatory = $false,
-        HelpMessage = "Amount of time to wait between Stop and Kill (in seconds)"
-    )]
-    [int32] $NoActionWaitTime = 0
+    [int32] $NoActionWaitTime = 2
 )
 
 function Main {
@@ -43,18 +37,12 @@ function Main {
         )]
         [ValidateNotNull()]
         [string] $DestinationPath,
-
-        [Parameter(
-            Mandatory = $false,
-            HelpMessage = "Amount of time to wait between Stop and Kill (in seconds)"
-        )]
-        [int32] $StopToKillWaitTime = 10,
     
         [Parameter(
             Mandatory = $false,
             HelpMessage = "Amount of time to wait between Stop and Kill (in seconds)"
         )]
-        [int32] $NoActionWaitTime = 0
+        [int32] $NoActionWaitTime = 2
     )
 
     $filesToCopy = Get-ChildItem $SourcePath -Recurse | Where-Object { $_.PsIsContainer -eq $false }
@@ -92,33 +80,7 @@ function Main {
 
                     if($processId){
                         Write-Host "Found locked file $($destinationFile). Killing process ID: $($processId)"
-                        # Stop-Process -Id $process.PID
-                        Stop-Process -Id $processId
-
-                        if ($StopToKillWaitTime -gt 0) {
-                            Write-Host "Waiting $($StopToKillWaitTime) seconds before checking force kill is necessary."
-                            Start-Sleep -Seconds $StopToKillWaitTime
-                        }
-                        
-                        $fileHandleForce = $null
-
-                        try {
-                            $fileHandleForce = New-Object IO.FileStream ($destinationFile, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
-                        }
-                        catch {
-                            $processId = Get-ProcessID -Process $(Get-FileLockProcess -FilePath $destinationFile)
-                
-                            if($processId){
-                                Write-Host "Still found locked file $($destinationFile) after waiting 10 seconds. Killing process ID: $($processId)"
-                                Stop-Process -Id $processId -Force
-                            }
-                        }
-                        finally {
-                            if($fileHandleForce){
-                                $fileHandleForce.Close()
-                                $fileHandleForce.Dispose()
-                            }
-                        }
+                        Stop-Process -Id $processId -Force
                     }
                 }
                 finally {
@@ -139,13 +101,17 @@ function Main {
         Write-Host "Copying $($sourceFile) to $($destinationFile)"
 
         try {
-            # Copy-Item $sourceFile $destinationFile -Force -Recurse
             Copy-Item-Recurse $sourceFile $destinationFile
         }
         catch {
             Write-Host "Copy Failed || Source: $($sourceFile)  ||  Destination: $($destinationFile)"
+            $global:FunctionResult = "1"
+            return
         }
     }
+
+    Write-Host "ForceCopy Success!"
+    $global:FunctionResult = "0"
 }
 
 function Get-ProcessID {
@@ -158,7 +124,6 @@ function Get-ProcessID {
         [ValidateNotNull()]
         [System.Object] $Process
     )
-    # $Process = $args[0]
 
     if ($Process -eq $null) {
         return $null
@@ -180,10 +145,18 @@ function Get-ProcessID {
 function Copy-Item-Recurse {
     $SourceFilePath = $args[0]
     $DestinationFilePath = $args[1]
-  
+    
     If (-not (Test-Path $DestinationFilePath)) {
-        New-Item -ItemType File -Path $DestinationFilePath -Force
+        If ((Get-Item $SourceFilePath) -ne [System.IO.DirectoryInfo]) {
+            Write-Host "Creating new file $($DestinationFilePath)"
+            New-Item -ItemType File -Path $DestinationFilePath -Force
+        }
+        else {
+            Write-Host "Creating new directory $($DestinationFilePath)"
+            New-Item -ItemType Directory -Path $DestinationFilePath -Force
+        }
     } 
+    Write-Host "Copying file contents $($DestinationFilePath)"
     Copy-Item -Path $SourceFilePath -Destination $DestinationFilePath
 }
 
@@ -193,7 +166,6 @@ function Get-FileLockProcess {
         [Parameter(Mandatory=$True)]
         [string]$FilePath
     )
-
     ##### BEGIN Variable/Parameter Transforms and PreRun Prep #####
 
     if (! $(Test-Path $FilePath)) {
@@ -207,8 +179,9 @@ function Get-FileLockProcess {
 
     ##### BEGIN Main Body #####
 
-    if ($PSVersionTable.PSEdition -eq "Desktop" -or $PSVersionTable.Platform -eq "Win32NT" -or 
-    $($PSVersionTable.PSVersion.Major -le 5 -and $PSVersionTable.PSVersion.Major -ge 3)) {
+    if ($PSVersionTable.Platform -eq "Win32NT" -or 
+        $($PSVersionTable.PSVersion.Major -le 5 -and $PSVersionTable.PSVersion.Major -ge 3 -and $PSVersionTable.PSEdition -eq "Desktop")
+    ) {
         $CurrentlyLoadedAssemblies = [System.AppDomain]::CurrentDomain.GetAssemblies()
     
         $AssembliesFullInfo = $CurrentlyLoadedAssemblies | Where-Object {
@@ -216,7 +189,9 @@ function Get-FileLockProcess {
             $_.GetName().Name -eq "mscorlib" -or
             $_.GetName().Name -eq "System" -or
             $_.GetName().Name -eq "System.Collections" -or
+            $_.GetName().Name -eq "System.ComponentModel.Primitives" -or
             $_.GetName().Name -eq "System.Core" -or
+            $_.GetName().Name -eq "System.Diagnostics.Process" -or
             $_.GetName().Name -eq "System.IO" -or
             $_.GetName().Name -eq "System.Linq" -or
             $_.GetName().Name -eq "System.Runtime" -or
@@ -227,17 +202,36 @@ function Get-FileLockProcess {
   
         $ReferencedAssemblies = $AssembliesFullInfo.FullName | Sort-Object | Get-Unique
 
-        $usingStatementsAsString = @"
-        using Microsoft.CSharp;
-        using System.Collections.Generic;
-        using System.Collections;
-        using System.IO;
-        using System.Linq;
-        using System.Runtime.InteropServices;
-        using System.Runtime;
-        using System;
-        using System.Diagnostics;
-"@
+        $usingStatementsAsString = $null
+
+        # For powershell versions 3 to 5, we can use default System.Diagnostics but in 6+, we need to use a static reference. 
+        if ($($PSVersionTable.PSVersion.Major -le 5 -and $PSVersionTable.PSVersion.Major -ge 3))
+        {
+            $usingStatementsAsString = "
+            using Microsoft.CSharp;
+            using System.Collections.Generic;
+            using System.Collections;
+            using System.IO;
+            using System.Linq;
+            using System.Runtime.InteropServices;
+            using System.Runtime;
+            using System;
+            using System.Diagnostics;"
+        }
+        else
+        {
+            $usingStatementsAsString = "
+            using Microsoft.CSharp;
+            using System.Collections.Generic;
+            using System.Collections;
+            using System.IO;
+            using System.Linq;
+            using System.Runtime.InteropServices;
+            using System.Runtime;
+            using System;
+            using static System.Diagnostics.Process;
+            "
+        }
         
         $TypeDefinition = @"
         $usingStatementsAsString
@@ -318,11 +312,11 @@ function Get-FileLockProcess {
                 /// http://wyupdate.googlecode.com/svn-history/r401/trunk/frmFilesInUse.cs (no copyright in code at time of viewing)
                 /// 
                 /// </remarks>
-                static public List<Process> WhoIsLocking(string path)
+                static public List<System.Diagnostics.Process> WhoIsLocking(string path)
                 {
                     uint handle;
                     string key = Guid.NewGuid().ToString();
-                    List<Process> processes = new List<Process>();
+                    List<System.Diagnostics.Process> processes = new List<System.Diagnostics.Process>();
         
                     int res = RmStartSession(out handle, 0, key);
                     if (res != 0) throw new Exception("Could not begin restart session.  Unable to determine file locker.");
@@ -355,7 +349,7 @@ function Get-FileLockProcess {
                             res = RmGetList(handle, out pnProcInfoNeeded, ref pnProcInfo, processInfo, ref lpdwRebootReasons);
                             if (res == 0)
                             {
-                                processes = new List<Process>((int)pnProcInfo);
+                                processes = new List<System.Diagnostics.Process>((int)pnProcInfo);
         
                                 // Enumerate all of the results and add them to the 
                                 // list to be returned
@@ -363,7 +357,7 @@ function Get-FileLockProcess {
                                 {
                                     try
                                     {
-                                        processes.Add(Process.GetProcessById(processInfo[i].Process.dwProcessId));
+                                        processes.Add(System.Diagnostics.Process.GetProcessById(processInfo[i].Process.dwProcessId));
                                     }
                                     // catch the error -- in case the process is no longer running
                                     catch (ArgumentException) { }
@@ -386,6 +380,7 @@ function Get-FileLockProcess {
 
         $CheckMyCoreUtilsFileLockUtilLoaded = $CurrentlyLoadedAssemblies | Where-Object {$_.ExportedTypes -like "MyCore.Utils.FileLockUtil*"}
         if ($CheckMyCoreUtilsFileLockUtilLoaded -eq $null) {
+            Add-Type -AssemblyName "Microsoft.CSharp"
             Add-Type -ReferencedAssemblies $ReferencedAssemblies -TypeDefinition $TypeDefinition
         }
         else {
@@ -394,7 +389,9 @@ function Get-FileLockProcess {
 
         $Result = [MyCore.Utils.FileLockUtil]::WhoIsLocking($FilePath)
     }
-    if ($PSVersionTable.Platform -ne $null -and $PSVersionTable.Platform -ne "Win32NT") {
+    else 
+    # ($PSVersionTable.Platform -ne $null -and $PSVersionTable.Platform -ne "Win32NT") 
+    {
         $lsofOutput = lsof $FilePath
 
         function Parse-lsofStrings ($lsofOutput, $Index) {
@@ -420,4 +417,4 @@ function Get-FileLockProcess {
 
 }
 
-Main -SourcePath $SourcePath -DestinationPath $DestinationPath -StopToKillWaitTime $StopToKillWaitTime -NoActionWaitTime $NoActionWaitTime
+Main -SourcePath $SourcePath -DestinationPath $DestinationPath -NoActionWaitTime $NoActionWaitTime
